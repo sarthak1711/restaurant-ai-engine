@@ -15,3 +15,11 @@ Correct no-send decision during peak periods.
 Identified architectural issue: currently passing pre-computed lull flag to Claude instead 
 of raw data. Claude should reason over raw signals, not pre-computed verdicts.
 Next: refactor to Level 2 — pass raw revenue data and let Claude decide.
+
+Day 5 - Refactored to Level 2 architecture. Claude now reasons over raw business signals.
+Built fetch_restaurant_signals(), build_analysis_context(), generate_campaign_decision(),
+save_campaign_to_db(), run_campaign_pipeline(), run_pipeline_all_restaurants().
+All wired into FastAPI — 5 endpoints working.
+Claude independently identified AOV collapse as a signal we hadn't flagged.
+5/6 restaurants correctly identified during lull period. Melbourne Kitchen skipped (cooldown).
+Next: scheduler + email dispatch.
