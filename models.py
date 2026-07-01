@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, ForeignKey, Text
+from sqlalchemy import create_engine, Column, Integer, String, Float, Date, DateTime, ForeignKey, Text,Boolean
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from dotenv import load_dotenv
@@ -12,77 +12,145 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-
-class Restaurant(Base):
-    __tablename__ = "restaurants"
-
-    id = Column(Integer, primary_key=True)
+class BusinessProfile(Base):
+    __tablename__ = "business_profiles"
+    id = Column(Integer,primary_key=True)
     name = Column(String(100), nullable=False)
-    email = Column(String(100), nullable=False)
-    country = Column(String(50), nullable=False)  # IN, AU, CA
-    created_at = Column(DateTime)
+    email = Column(String(100),nullable=False)
+    phone_no = Column(String(100))
+    address = Column(String(100))
+    suburb = Column(String(100))
+    state = Column(String(100))
+    country = Column(String(100))
+    zip_code = Column(String(10))
+    
+    categories = relationship(
+        "Category",
+        back_populates="business_profile",
+        cascade="all, delete-orphan"
+    )
+    items = relationship(
+        "Item",
+        back_populates="business_profile",
+        cascade="all, delete-orphan"
+    )
+    customers = relationship(
+        "Customer",
+        back_populates="business_profile",
+        cascade="save-update, merge"
+    )
+    orders = relationship(
+        "Order",
+        back_populates="business_profile",
+        cascade="save-update, merge"
+    )
 
-    orders = relationship("Order", back_populates="restaurant")
-    daily_revenues = relationship("DailyRevenue", back_populates="restaurant")
-    customers = relationship("Customer", back_populates="restaurant")
-    campaigns = relationship("Campaign", back_populates="restaurant")
+class Category(Base):
+    __tablename__ = "categories"
+    id = Column(Integer,primary_key=True)
+    business_id  = Column(Integer,ForeignKey('business_profiles.id'), nullable=False)
+    category_name = Column(String(100), nullable=False)
+    active = Column(Boolean, default=True)
+    business_profile = relationship(
+        "BusinessProfile",
+        back_populates="categories"
+    )
+    items = relationship(
+        "Item",
+        back_populates="category",
+        cascade="all, delete-orphan"
+    )
 
+class Item(Base):
+    __tablename__ = "items"
+    id = Column(Integer,primary_key=True)
+    business_id = Column(Integer,ForeignKey('business_profiles.id'), nullable=False)
+    category_id = Column(Integer,ForeignKey('categories.id'), nullable=False)
+    item_name = Column(String(100), nullable=False)
+    price = Column(Float, nullable=False)
+    tax = Column(Float, nullable=False)
+    active = Column(Boolean, default=True)
+    
+    business_profile = relationship(
+        "BusinessProfile",
+        back_populates="items"
+    )
+    
+    category = relationship(
+        "Category",
+        back_populates="items"
+    )
 
-class Order(Base):
-    __tablename__ = "orders"
-
-    id = Column(Integer, primary_key=True)
-    restaurant_id = Column(Integer, ForeignKey("restaurants.id"))
-    total_amount = Column(Float, nullable=False)
-    status = Column(String(20), default="completed")  # completed, cancelled, refunded
-    order_type = Column(String(20), default="dine_in")  # dine_in, delivery, takeaway
-    created_at = Column(DateTime)
-
-    restaurant = relationship("Restaurant", back_populates="orders")
-
-
-class DailyRevenue(Base):
-    __tablename__ = "daily_revenue"
-
-    id = Column(Integer, primary_key=True)
-    restaurant_id = Column(Integer, ForeignKey("restaurants.id"))
-    date = Column(Date, nullable=False)
-    total_revenue = Column(Float, default=0.0)
-    order_count = Column(Integer, default=0)
-    avg_order_value = Column(Float, default=0.0)
-
-    restaurant = relationship("Restaurant", back_populates="daily_revenues")
-
+    order_line_items = relationship(
+        "OrderLineItem",
+        back_populates="item",
+        cascade="save-update, merge"
+    )
 
 class Customer(Base):
-    __tablename__ = "customers"
+    __tablename__ ="customers"
+    id = Column(Integer,primary_key=True)
+    business_id = Column(Integer,ForeignKey('business_profiles.id'), nullable=False)
+    customer_name = Column(String(100),nullable=False)
+    customer_email = Column(String(100),nullable=False)
+    segment = Column(String(100),nullable=False)
+    business_profile = relationship(
+        "BusinessProfile",
+        back_populates="customers"
+    )
+    orders = relationship(
+        "Order",
+        back_populates="customer",
+        cascade="save-update, merge"
+    )
 
-    id = Column(Integer, primary_key=True)
-    restaurant_id = Column(Integer, ForeignKey("restaurants.id"))
-    name = Column(String(100), nullable=False)
-    email = Column(String(100), nullable=False)
-    total_orders = Column(Integer, default=0)
-    total_spent = Column(Float, default=0.0)
-    last_order_date = Column(Date)
-    segment = Column(String(20), default="regular")  # vip, regular, at_risk, churned
+class Order(Base):
+    __tablename__="orders"
+    id = Column(Integer,primary_key=True)
+    business_id = Column(Integer,ForeignKey('business_profiles.id'), nullable=False)
+    customer_id = Column(Integer,ForeignKey('customers.id'), nullable=False)
+    order_date = Column(DateTime,nullable=False)
+    status = Column(String(100),nullable=False)
+    payment_mode = Column(String(100),nullable=False)
+    discount = Column(Float,nullable=False, default=0.0)
+    total = Column(Float,nullable=False)
+    tax = Column(Float,nullable=False, default=0.0)
+    
+    business_profile = relationship(
+        "BusinessProfile",
+        back_populates="orders"
+    )
+    
+    customer = relationship(
+        "Customer",
+        back_populates="orders"
+    )
 
-    restaurant = relationship("Restaurant", back_populates="customers")
+    order_line_items = relationship(
+        "OrderLineItem",
+        back_populates="order",
+        cascade="all, delete-orphan"
+    )
 
+class OrderLineItem(Base):
+    __tablename__="order_line_items"
+    id = Column(Integer,primary_key=True)
+    order_id = Column(Integer,ForeignKey('orders.id'),nullable=False)
+    item_id = Column(Integer,ForeignKey('items.id'),nullable=False)
+    item_name = Column(String(100), nullable=False)
+    item_price = Column(Float, nullable=False)
+    item_discount = Column(Float,nullable=False, default=0.0)
+    item_tax = Column(Float,nullable=False, default=0.0)
+    
+    order = relationship(
+        "Order",
+        back_populates="order_line_items"
+    )
 
-class Campaign(Base):
-    __tablename__ = "campaigns"
-
-    id = Column(Integer, primary_key=True)
-    restaurant_id = Column(Integer, ForeignKey("restaurants.id"))
-    subject = Column(String(200))
-    body = Column(Text)
-    trigger_type = Column(String(50))  # lull_period, holiday, pre_stock
-    status = Column(String(20), default="draft")  # draft, sent, failed
-    created_at = Column(DateTime)
-    sent_at = Column(DateTime, nullable=True)
-
-    restaurant = relationship("Restaurant", back_populates="campaigns")
-
+    item = relationship(
+        "Item",
+        back_populates="order_line_items"
+    )
 
 def create_tables():
     Base.metadata.create_all(engine)

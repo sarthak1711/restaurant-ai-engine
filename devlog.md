@@ -23,3 +23,11 @@ All wired into FastAPI — 5 endpoints working.
 Claude independently identified AOV collapse as a signal we hadn't flagged.
 5/6 restaurants correctly identified during lull period. Melbourne Kitchen skipped (cooldown).
 Next: scheduler + email dispatch.
+
+01 July 2026 - Completed models.py from scratch. All 6 tables verified in Postgres with correct 
+nullable constraints and foreign keys. Fixed missing nullable=False on Order.business_id 
+and Order.customer_id after reading actual Postgres output - learned create_all() won't 
+update existing tables, had to drop and recreate.
+Learned Alembic workflow for production schema changes - never drop tables in production,
+always use versioned migrations with upgrade() and downgrade() functions.
+Next: seed data with real Indian food dataset for menu items.
