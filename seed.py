@@ -1,387 +1,530 @@
+import pandas as pd
 import random
-from datetime import datetime, timedelta, date
-from models import SessionLocal, Restaurant, Order, DailyRevenue, Customer, Campaign, engine
-from sqlalchemy.orm import Session
+from datetime import datetime, date, timedelta
+from models import (
+    SessionLocal, BusinessProfile, Category,
+    Item, Customer, Order, OrderLineItem
+)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Constants ─────────────────────────────────────────────────────────────────
 
-def random_date(start: date, end: date) -> date:
-    delta = (end - start).days
-    return start + timedelta(days=random.randint(0, delta))
+CATEGORIES = ["Starter", "Main Course", "Side Dish", "Dessert", "Beverages"]
 
-def random_datetime_on(d: date) -> datetime:
-    # Realistic meal time distribution
-    # Lunch: 12-15, Dinner: 19-22, off-peak: 10-12, 15-19
-    meal_slot = random.choices(
-        ["lunch", "dinner", "off_peak"],
-        weights=[35, 50, 15]
-    )[0]
-    if meal_slot == "lunch":
-        hour = random.randint(12, 14)
-    elif meal_slot == "dinner":
-        hour = random.randint(19, 22)
-    else:
-        hour = random.randint(10, 18)
-    return datetime(d.year, d.month, d.day, hour, random.randint(0, 59))
-
-# ── Restaurant profiles — size differences by country ─────────────────────────
-
-RESTAURANTS = [
-    # India — smaller avg order value, higher volume
-    {"name": "Spice Garden",       "email": "spice@example.com",   "country": "IN",
-     "base_orders": 55,  "base_aov": 520,  "size": "medium"},
-    {"name": "The Curry House",    "email": "curry@example.com",   "country": "IN",
-     "base_orders": 40,  "base_aov": 480,  "size": "small"},
-    {"name": "Tandoor Express",    "email": "tandoor@example.com", "country": "IN",
-     "base_orders": 75,  "base_aov": 560,  "size": "large"},
-    # Australia — higher aov, moderate volume
-    {"name": "Sydney Bites",       "email": "sydney@example.com",  "country": "AU",
-     "base_orders": 45,  "base_aov": 1800, "size": "medium"},
-    {"name": "Melbourne Kitchen",  "email": "melb@example.com",    "country": "AU",
-     "base_orders": 35,  "base_aov": 1650, "size": "small"},
-    # Canada — between india and australia
-    {"name": "Toronto Diner",      "email": "toronto@example.com", "country": "CA",
-     "base_orders": 50,  "base_aov": 1200, "size": "medium"},
-]
-
-# Day of week multipliers — Mon=0, Sun=6
-DOW_MULTIPLIER = {
-    0: 0.70,   # Monday    — deadest day
-    1: 0.75,   # Tuesday
-    2: 0.82,   # Wednesday
-    3: 0.88,   # Thursday
-    4: 1.20,   # Friday    — starts the weekend rush
-    5: 1.40,   # Saturday  — busiest
-    6: 1.25,   # Sunday
+# Course mapping: your category name → dataset Course value
+COURSE_MAP = {
+    "Starter":     "Appetizer",
+    "Main Course": "Main Course",
+    "Side Dish":   "Side Dish",
+    "Dessert":     "Dessert",
 }
 
-# ── Lull and peak periods ─────────────────────────────────────────────────────
+# Price ranges by country and category
+# Format: (min, max)
+PRICE_RANGES = {
+    "IN": {
+        "Starter":     (100, 250),
+        "Main Course": (200, 400),
+        "Side Dish":   (150, 300),
+        "Dessert":     (80,  150),
+        "Beverages":   (50,  150),
+    },
+    "AU": {
+        "Starter":     (10,  15),
+        "Main Course": (12,  20),
+        "Side Dish":   (7,   12),
+        "Dessert":     (5,   7),
+        "Beverages":   (5,   7),
+    },
+    "CA": {
+        "Starter":     (10,  15),
+        "Main Course": (12,  20),
+        "Side Dish":   (7,   12),
+        "Dessert":     (5,   7),
+        "Beverages":   (5,   7),
+    },
+}
 
-# Each lull has a gradual_start — when the decline begins (3-4 days before core lull)
-LULL_PERIODS = [
+# Standard beverages hardcoded for all restaurants
+# These are realistic for each country
+BEVERAGES = {
+    "IN": [
+        "Masala Chai", "Filter Coffee", "Lassi", "Nimbu Pani",
+        "Mango Shake", "Buttermilk", "Cold Coffee"
+    ],
+    "AU": [
+        "Flat White", "Long Black", "Fresh Orange Juice",
+        "Sparkling Water", "Lemonade", "Iced Tea", "Smoothie"
+    ],
+    "CA": [
+        "Drip Coffee", "Cappuccino", "Fresh Apple Juice",
+        "Sparkling Water", "Lemonade", "Iced Tea", "Milkshake"
+    ],
+}
+
+# Fully hardcoded items for QSR Burger restaurant
+# Organized by category name → list of item names
+BURGER_ITEMS = {
+    "Starter": [
+        "Crispy Chicken Wings", "Onion Rings", "Mozzarella Sticks",
+        "Loaded Nachos", "Chicken Nuggets", "Potato Wedges",
+        "Coleslaw Cup"
+    ],
+    "Main Course": [
+        "Classic Beef Burger", "Crispy Chicken Burger", "Double Smash Burger",
+        "BBQ Bacon Burger", "Veggie Burger", "Grilled Chicken Burger",
+        "Mushroom Swiss Burger", "Spicy Jalapeno Burger", "Fish Burger"
+    ],
+    "Side Dish": [
+        "Classic Fries", "Cheese Fries", "Sweet Potato Fries",
+        "Peri Peri Fries", "Mac and Cheese", "Garden Salad",
+        "Coleslaw Bowl"
+    ],
+    "Dessert": [
+        "Chocolate Brownie", "Vanilla Soft Serve", "Oreo McFlurry Style",
+        "Apple Pie", "Chocolate Milkshake Dessert", "Strawberry Sundae"
+    ],
+}
+
+# Restaurant definitions
+# cuisine_filter is the exact value to match against the CSV's Cuisine column
+# None means fully hardcoded (no CSV lookup)
+RESTAURANTS = [
     {
-        "gradual_start": date(2024, 11, 28),
-        "core_start":    date(2024, 12, 2),
-        "core_end":      date(2024, 12, 10),
-        "gradual_end":   date(2024, 12, 13),
-        "name":          "early_december_slump"
+        "name":           "Spice Route",
+        "cuisine_filter": "North Indian Recipes",
+        "country":        "IN",
+        "state":          "Delhi",
+        "suburb":         "Connaught Place",
+        "address":        "12 Janpath Road",
+        "zip_code":       "110001",
+        "phone_no":       "+91-9812345678",
+        "email":          "spiceroute@example.com",
     },
     {
-        "gradual_start": date(2025, 1, 12),
-        "core_start":    date(2025, 1, 15),
-        "core_end":      date(2025, 1, 25),
-        "gradual_end":   date(2025, 1, 28),
-        "name":          "post_newyear_slump"
+        "name":           "Dosa House",
+        "cuisine_filter": "South Indian Recipes",
+        "country":        "AU",
+        "state":          "New South Wales",
+        "suburb":         "Parramatta",
+        "address":        "45 Church Street",
+        "zip_code":       "2150",
+        "phone_no":       "+61-412345678",
+        "email":          "dosahouse@example.com",
     },
     {
-        "gradual_start": date(2025, 3, 1),
-        "core_start":    date(2025, 3, 4),
-        "core_end":      date(2025, 3, 12),
-        "gradual_end":   date(2025, 3, 15),
-        "name":          "march_midmonth_dip"
+        "name":           "Dragon Wok",
+        "cuisine_filter": "Chinese",
+        "country":        "IN",
+        "state":          "Maharashtra",
+        "suburb":         "Bandra",
+        "address":        "7 Hill Road",
+        "zip_code":       "400050",
+        "phone_no":       "+91-9823456789",
+        "email":          "dragonwok@example.com",
+    },
+    {
+        "name":           "Coconut Grove",
+        "cuisine_filter": "South Indian Recipes",
+        "country":        "IN",
+        "state":          "Karnataka",
+        "suburb":         "Indiranagar",
+        "address":        "22 100 Feet Road",
+        "zip_code":       "560038",
+        "phone_no":       "+91-9834567890",
+        "email":          "coconutgrove@example.com",
+    },
+    {
+        "name":           "Punjab Da Dhaba",
+        "cuisine_filter": "Punjabi",
+        "country":        "CA",
+        "state":          "Ontario",
+        "suburb":         "Brampton",
+        "address":        "88 Main Street North",
+        "zip_code":       "L6V1N8",
+        "phone_no":       "+1-4165678901",
+        "email":          "punjabdhaba@example.com",
+    },
+    {
+        "name":           "The Continental Table",
+        "cuisine_filter": "Continental",
+        "country":        "AU",
+        "state":          "Victoria",
+        "suburb":         "Fitzroy",
+        "address":        "31 Brunswick Street",
+        "zip_code":       "3065",
+        "phone_no":       "+61-423456789",
+        "email":          "continentaltable@example.com",
+    },
+    {
+        "name":           "BurgerBox",
+        "cuisine_filter": None,
+        "country":        "CA",
+        "state":          "British Columbia",
+        "suburb":         "Vancouver",
+        "address":        "101 Robson Street",
+        "zip_code":       "V6B1C8",
+        "phone_no":       "+1-6045678901",
+        "email":          "burgerbox@example.com",
+    },
+    {
+        "name":           "Curry Leaf",
+        "cuisine_filter": "Indian",
+        "country":        "IN",
+        "state":          "Uttar Pradesh",
+        "suburb":         "Hazratganj",
+        "address":        "5 MG Road",
+        "zip_code":       "226001",
+        "phone_no":       "+91-9856789012",
+        "email":          "curryleaf@example.com",
     },
 ]
 
-PEAK_PERIODS = [
-    {"start": date(2024, 12, 20), "end": date(2024, 12, 31), "name": "christmas_newyear", "multiplier": 1.85},
-    {"start": date(2025, 2, 13),  "end": date(2025, 2, 15),  "name": "valentines",        "multiplier": 1.60},
-    {"start": date(2025, 4, 18),  "end": date(2025, 4, 21),  "name": "easter",            "multiplier": 1.45},
-]
 
-# Holiday recovery — after a peak, there's always a hangover dip
-RECOVERY_PERIODS = [
-    {"start": date(2025, 1, 1),  "end": date(2025, 1, 10),  "multiplier": 0.65},  # post christmas/NY
-    {"start": date(2025, 2, 16), "end": date(2025, 2, 20),  "multiplier": 0.80},  # post valentines
-    {"start": date(2025, 4, 22), "end": date(2025, 4, 26),  "multiplier": 0.78},  # post easter
-]
+# ── Helper functions ──────────────────────────────────────────────────────────
 
-def get_lull_multiplier(d: date):
-    for lull in LULL_PERIODS:
-        if lull["core_start"] <= d <= lull["core_end"]:
-            return 0.38   # core lull — sharp drop
-        if lull["gradual_start"] <= d < lull["core_start"]:
-            # gradual decline — interpolate over the days
-            days_total  = (lull["core_start"] - lull["gradual_start"]).days
-            days_in     = (d - lull["gradual_start"]).days
-            progress    = days_in / days_total   # 0.0 → 1.0
-            return 1.0 - (progress * 0.62)       # tapers from 1.0 down to 0.38
-        if lull["core_end"] < d <= lull["gradual_end"]:
-            # gradual recovery after lull
-            days_total  = (lull["gradual_end"] - lull["core_end"]).days
-            days_in     = (d - lull["core_end"]).days
-            progress    = days_in / days_total
-            return 0.38 + (progress * 0.62)      # recovers from 0.38 back to 1.0
-    return None
+def random_price(country, category):
+    """Return a realistic random price for a given country and category."""
+    low, high = PRICE_RANGES[country][category]
+    return round(random.uniform(low, high), 2)
 
-def get_peak_multiplier(d: date):
-    for peak in PEAK_PERIODS:
-        if peak["start"] <= d <= peak["end"]:
-            return peak["multiplier"]
-    return None
 
-def get_recovery_multiplier(d: date):
-    for rec in RECOVERY_PERIODS:
-        if rec["start"] <= d <= rec["end"]:
-            return rec["multiplier"]
-    return None
+def get_items_from_csv(df, cuisine_filter, course_name, n_items=8):
+    """
+    Filter the dataset by cuisine and course, return n random item names.
+    Falls back to a broader filter if not enough items found.
+    """
+    course_value = COURSE_MAP.get(course_name)
+    if not course_value:
+        return []
 
-def get_day_multiplier(d: date, restaurant: dict) -> tuple:
-    """Returns (order_multiplier, aov_multiplier) for a given day."""
-    base_mult = DOW_MULTIPLIER[d.weekday()]
+    filtered = df[
+        (df["Cuisine"] == cuisine_filter) &
+        (df["Course"]  == course_value)
+    ]
 
-    lull_mult     = get_lull_multiplier(d)
-    peak_mult     = get_peak_multiplier(d)
-    recovery_mult = get_recovery_multiplier(d)
+    # If less than n_items found, relax the cuisine filter
+    if len(filtered) < n_items:
+        filtered = df[df["Course"] == course_value]
 
-    if lull_mult is not None:
-        order_mult = base_mult * lull_mult
-        aov_mult   = lull_mult + 0.15   # aov drops less than volume during lull
-    elif peak_mult is not None:
-        order_mult = base_mult * peak_mult
-        aov_mult   = peak_mult * 1.1    # people spend more per order during peaks
-    elif recovery_mult is not None:
-        order_mult = base_mult * recovery_mult
-        aov_mult   = recovery_mult + 0.10
-    else:
-        order_mult = base_mult
-        aov_mult   = 1.0
+    if len(filtered) == 0:
+        return []
 
-    return order_mult, aov_mult
+    sample_size = min(n_items, len(filtered))
+    sampled = filtered.sample(n=sample_size)
 
-START_DATE = date(2024, 11, 1)
-END_DATE   = date(2025, 5, 1)
+    # Use TranslatedRecipeName if available, else fall back to RecipeName
+    names = []
+    for _, row in sampled.iterrows():
+        name = row.get("TranslatedRecipeName") or row.get("RecipeName")
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip()[:100])  # enforce column max length
 
-FIRST_NAMES = ["Rahul", "Priya", "Amit", "Sneha", "Vikram", "Anjali",
-               "James", "Sarah", "Liam", "Emma", "Noah", "Olivia",
-               "Arjun", "Meera", "Rohan", "Kavya", "Tom", "Lucy"]
-LAST_NAMES  = ["Sharma", "Patel", "Singh", "Smith", "Brown", "Wilson",
-               "Johnson", "Williams", "Jones", "Taylor", "Martin", "Lee",
-               "Gupta", "Kumar", "Verma", "Chen", "Davis", "Miller"]
+    return names
 
-# ── Seed ──────────────────────────────────────────────────────────────────────
 
-def seed():
-    db: Session = SessionLocal()
+# ── Seed functions ────────────────────────────────────────────────────────────
 
-    try:
-        # Clear
-        db.query(Campaign).delete()
-        db.query(Order).delete()
-        db.query(DailyRevenue).delete()
-        db.query(Customer).delete()
-        db.query(Restaurant).delete()
-        db.commit()
-        print("Cleared existing data")
+def seed_businesses(db):
+    """
+    Create all 8 BusinessProfile records.
+    Returns a list of created BusinessProfile objects with their DB-assigned IDs.
+    """
+    created = []
+    for r in RESTAURANTS:
+        business = BusinessProfile(
+            name=r["name"],
+            email=r["email"],
+            phone_no=r["phone_no"],
+            address=r["address"],
+            suburb=r["suburb"],
+            state=r["state"],
+            country=r["country"],
+            zip_code=r["zip_code"],
+        )
+        db.add(business)
+        created.append((business, r))
 
-        # ── Restaurants ──
-        restaurant_objects = []
-        for r in RESTAURANTS:
-            restaurant = Restaurant(
-                name=r["name"],
-                email=r["email"],
-                country=r["country"],
-                created_at=datetime(2024, 10, 1)
+    db.commit()
+    print(f"Created {len(created)} business profiles")
+    return created
+
+
+def seed_categories_and_items(db, businesses, df):
+    """
+    For each business, create 5 categories and seed items into each.
+    Indian food dataset is used where cuisine_filter is set.
+    Hardcoded items are used for BurgerBox.
+    Beverages are always hardcoded.
+    """
+    total_categories = 0
+    total_items = 0
+
+    for business, restaurant_config in businesses:
+        cuisine_filter = restaurant_config["cuisine_filter"]
+        country        = restaurant_config["country"]
+
+        for category_name in CATEGORIES:
+            # Create the category
+            category = Category(
+                business_id=business.id,
+                category_name=category_name,
+                active=True,
             )
-            db.add(restaurant)
-            restaurant_objects.append((restaurant, r))
+            db.add(category)
+            db.flush()  # flush to get category.id before creating items
+            total_categories += 1
+
+            # Determine item names for this category
+            if category_name == "Beverages":
+                # Always hardcoded, same for all restaurants per country
+                item_names = BEVERAGES[country]
+
+            elif cuisine_filter is None:
+                # BurgerBox — fully hardcoded
+                item_names = BURGER_ITEMS.get(category_name, [])
+
+            else:
+                # Indian food dataset
+                item_names = get_items_from_csv(df, cuisine_filter, category_name)
+
+            # Create items
+            for item_name in item_names:
+                item = Item(
+                    business_id=business.id,
+                    category_id=category.id,
+                    item_name=item_name,
+                    price=random_price(country, category_name),
+                    tax=5.0 if country == "IN" else 10.0,
+                    active=True,
+                )
+                db.add(item)
+                total_items += 1
+
         db.commit()
-        print(f"Created {len(restaurant_objects)} restaurants")
 
-        # ── Customers — repeat vs new ratio ──
-        # Each restaurant has a pool of repeat customers (60%)
-        # and new customers trickle in each month (40%)
-        all_customers = []
-        customer_pools = {}   # restaurant_id → list of customer ids
+    print(f"Created {total_categories} categories and {total_items} items")
 
-        for restaurant, profile in restaurant_objects:
-            pool = []
-            # Core repeat customers — 60% of expected monthly traffic
-            num_repeat = int(profile["base_orders"] * 30 * 0.60 / 8)  # avg 8 visits/month
-            num_repeat = max(num_repeat, 60)
 
-            for _ in range(num_repeat):
-                first = random.choice(FIRST_NAMES)
-                last  = random.choice(LAST_NAMES)
-                total_orders = random.randint(8, 45)
-                total_spent  = round(total_orders * profile["base_aov"] * random.uniform(0.85, 1.15), 2)
-                last_order   = random_date(date(2025, 2, 1), END_DATE)
+def seed_customers(db, businesses):
+    """
+    Create 60-100 customers per restaurant.
+    Returns dict of business_id -> list of Customer objects.
+    """
+    first_names = [
+        "Rahul", "Priya", "Amit", "Sneha", "Vikram", "Anjali", "Rohan",
+        "Meera", "James", "Sarah", "Liam", "Emma", "Noah", "Olivia",
+        "Tom", "Lucy", "Arjun", "Kavya", "Singh", "Patel"
+    ]
+    last_names = [
+        "Sharma", "Patel", "Singh", "Smith", "Brown", "Wilson", "Johnson",
+        "Williams", "Jones", "Taylor", "Gupta", "Kumar", "Verma", "Chen",
+        "Davis", "Miller", "Martin", "Lee", "Khan", "Mehta"
+    ]
+    segments = ["vip", "regular", "regular", "regular", "at_risk", "churned"]
 
-                if total_orders >= 25 and total_spent >= profile["base_aov"] * 20:
-                    segment = "vip"
-                else:
-                    segment = "regular"
+    customer_map = {}
+    total_customers = 0
 
-                c = Customer(
-                    restaurant_id=restaurant.id,
-                    name=f"{first} {last}",
-                    email=f"{first.lower()}.{last.lower()}{random.randint(1,999)}@example.com",
-                    total_orders=total_orders,
-                    total_spent=total_spent,
-                    last_order_date=last_order,
-                    segment=segment
-                )
-                db.add(c)
-                pool.append(c)
-                all_customers.append(c)
+    for business, _ in businesses:
+        customers = []
+        num_customers = random.randint(60, 100)
 
-            # At-risk customers — last order 45-90 days ago
-            for _ in range(int(num_repeat * 0.15)):
-                first = random.choice(FIRST_NAMES)
-                last  = random.choice(LAST_NAMES)
-                last_order = random_date(date(2024, 11, 1), date(2025, 1, 15))
-                c = Customer(
-                    restaurant_id=restaurant.id,
-                    name=f"{first} {last}",
-                    email=f"{first.lower()}.{last.lower()}{random.randint(1,999)}@example.com",
-                    total_orders=random.randint(3, 10),
-                    total_spent=round(random.randint(3,10) * profile["base_aov"] * 0.9, 2),
-                    last_order_date=last_order,
-                    segment="at_risk"
-                )
-                db.add(c)
-                pool.append(c)
-                all_customers.append(c)
+        for _ in range(num_customers):
+            first = random.choice(first_names)
+            last  = random.choice(last_names)
+            num   = random.randint(1, 999)
 
-            # Churned customers — last order 90+ days ago
-            for _ in range(int(num_repeat * 0.10)):
-                first = random.choice(FIRST_NAMES)
-                last  = random.choice(LAST_NAMES)
-                last_order = random_date(START_DATE, date(2024, 12, 1))
-                c = Customer(
-                    restaurant_id=restaurant.id,
-                    name=f"{first} {last}",
-                    email=f"{first.lower()}.{last.lower()}{random.randint(1,999)}@example.com",
-                    total_orders=random.randint(1, 3),
-                    total_spent=round(random.randint(1,3) * profile["base_aov"] * 0.8, 2),
-                    last_order_date=last_order,
-                    segment="churned"
-                )
-                db.add(c)
-                pool.append(c)
-                all_customers.append(c)
+            customer = Customer(
+                business_id=business.id,
+                customer_name=f"{first} {last}",
+                customer_email=f"{first.lower()}.{last.lower()}{num}@example.com",
+                segment=random.choice(segments),
+            )
+            db.add(customer)
+            customers.append(customer)
+            total_customers += 1
 
-            db.commit()
-            customer_pools[restaurant.id] = pool
+        db.commit()
+        customer_map[business.id] = customers
 
-        print(f"Created {len(all_customers)} customers")
+    print(f"Created {total_customers} customers")
+    return customer_map
 
-        # ── Daily Revenue + Orders ──
-        total_orders_created = 0
+
+def seed_orders(db, businesses, customer_map):
+    """
+    Create realistic orders with day-of-week patterns, lull periods,
+    and peak periods. Each order gets 1-4 order line items from
+    that restaurant's actual menu.
+    """
+
+    # Lull periods — revenue should visibly drop here
+    LULL_PERIODS = [
+        (date(2024, 12, 2),  date(2024, 12, 10)),
+        (date(2025, 1, 15),  date(2025, 1, 25)),
+        (date(2025, 3, 3),   date(2025, 3, 12)),
+    ]
+
+    # Peak periods — revenue spikes here
+    PEAK_PERIODS = [
+        (date(2024, 12, 20), date(2024, 12, 31)),
+        (date(2025, 2, 13),  date(2025, 2, 15)),
+        (date(2025, 4, 18),  date(2025, 4, 21)),
+    ]
+
+    # Day of week multipliers — Mon=0, Sun=6
+    DOW_MULTIPLIER = {
+        0: 0.70,  # Monday
+        1: 0.75,  # Tuesday
+        2: 0.82,  # Wednesday
+        3: 0.88,  # Thursday
+        4: 1.20,  # Friday
+        5: 1.40,  # Saturday
+        6: 1.25,  # Sunday
+    }
+
+    def is_lull(d):
+        return any(start <= d <= end for start, end in LULL_PERIODS)
+
+    def is_peak(d):
+        return any(start <= d <= end for start, end in PEAK_PERIODS)
+
+    def orders_for_day(d, base_orders):
+        multiplier = DOW_MULTIPLIER[d.weekday()]
+        if is_peak(d):
+            multiplier *= 1.8
+        elif is_lull(d):
+            multiplier *= 0.35
+        noise = random.uniform(0.92, 1.08)
+        return max(5, int(base_orders * multiplier * noise))
+
+    START_DATE = date(2024, 11, 1)
+    END_DATE   = date(2025, 5, 1)
+
+    total_orders = 0
+    total_line_items = 0
+
+    for business, config in businesses:
+        customers = customer_map[business.id]
+        base_orders = random.randint(35, 65)
+
+        # Get all active items for this business
+        from sqlalchemy import text
+        items = db.execute(
+            text("SELECT id, price, tax,item_name  FROM items WHERE business_id = :bid AND active = true"),
+            {"bid": business.id}
+        ).fetchall()
+
+        if not items:
+            print(f"  Warning: no items found for {business.name}, skipping orders")
+            continue
+
         current = START_DATE
-
         while current <= END_DATE:
-            for restaurant, profile in restaurant_objects:
-                order_mult, aov_mult = get_day_multiplier(current, profile)
+            num_orders = orders_for_day(current, base_orders)
 
-                # Add small random noise so data doesn't look mechanical
-                noise        = random.uniform(0.92, 1.08)
-                order_count  = max(5, int(profile["base_orders"] * order_mult * noise))
-                aov          = round(profile["base_aov"] * aov_mult * random.uniform(0.95, 1.05), 2)
-                total_rev    = round(order_count * aov, 2)
+            for _ in range(num_orders):
+                customer = random.choice(customers)
 
-                dr = DailyRevenue(
-                    restaurant_id=restaurant.id,
-                    date=current,
-                    total_revenue=total_rev,
-                    order_count=order_count,
-                    avg_order_value=aov
+                # Random order time — lunch or dinner peaks
+                hour   = random.choices([12, 13, 14, 19, 20, 21, 22], weights=[15, 20, 10, 20, 20, 10, 5])[0]
+                minute = random.randint(0, 59)
+                order_datetime = datetime(current.year, current.month, current.day, hour, minute)
+
+                order = Order(
+                    business_id=business.id,
+                    customer_id=customer.id,
+                    order_date=order_datetime,
+                    status=random.choices(["paid", "pending"], weights=[95, 5])[0],
+                    payment_mode=random.choices(["card", "cash"], weights=[70, 30])[0],
+                    discount=0.0,
+                    tax=0.0,
+                    total=0.0,
                 )
-                db.add(dr)
+                db.add(order)
+                db.flush()
 
-                # Repeat vs new customer ratio — 60/40
-                repeat_count = int(order_count * 0.60)
-                new_count    = order_count - repeat_count
+                # Add 1-4 line items per order
+                selected_items = random.sample(items, k=min(random.randint(1, 4), len(items)))
+                order_total = 0.0
+                order_tax   = 0.0
 
-                pool = customer_pools[restaurant.id]
+                for item_row in selected_items:
+                    item_price    = float(item_row.price)
+                    item_tax_rate = float(item_row.tax)
+                    item_tax_amt  = round(item_price * item_tax_rate / 100, 2)
+                    item_name = item_row.item_name
 
-                # Repeat customer orders
-                for _ in range(repeat_count):
-                    customer = random.choice(pool)
-                    order = Order(
-                        restaurant_id=restaurant.id,
-                        total_amount=round(aov * random.uniform(0.70, 1.30), 2),
-                        status=random.choices(
-                            ["completed", "cancelled", "refunded"],
-                            weights=[93, 4, 3]
-                        )[0],
-                        order_type=random.choices(
-                            ["dine_in", "delivery", "takeaway"],
-                            weights=[50, 35, 15]
-                        )[0],
-                        created_at=random_datetime_on(current)
+                    line_item = OrderLineItem(
+                        order_id=order.id,
+                        item_id=item_row.id,
+                        item_name=item_name,       # will fill below
+                        item_price=item_price,
+                        item_discount=0.0,
+                        item_tax=item_tax_amt,
                     )
-                    db.add(order)
-                    total_orders_created += 1
+                    db.add(line_item)
 
-                # New customer orders
-                for _ in range(new_count):
-                    order = Order(
-                        restaurant_id=restaurant.id,
-                        total_amount=round(aov * random.uniform(0.60, 1.20), 2),
-                        status=random.choices(
-                            ["completed", "cancelled", "refunded"],
-                            weights=[88, 8, 4]
-                        )[0],
-                        order_type=random.choices(
-                            ["dine_in", "delivery", "takeaway"],
-                            weights=[40, 45, 15]
-                        )[0],
-                        created_at=random_datetime_on(current)
-                    )
-                    db.add(order)
-                    total_orders_created += 1
+                    order_total += item_price
+                    order_tax   += item_tax_amt
+                    total_line_items += 1
 
-            db.commit()
+                # Update order totals
+                order.total = round(order_total, 2)
+                order.tax   = round(order_tax, 2)
+                total_orders += 1
+
             current += timedelta(days=1)
 
-        print(f"Created daily revenue and {total_orders_created} orders")
-
-        # ── Sample past campaigns ──
-        for restaurant, profile in restaurant_objects:
-            for _ in range(random.randint(4, 7)):
-                sent_date = random_datetime_on(random_date(START_DATE, END_DATE))
-                campaign = Campaign(
-                    restaurant_id=restaurant.id,
-                    subject=random.choice([
-                        "We miss you! Here's 20% off your next visit",
-                        "Holiday special — book your table now",
-                        "Exclusive weekend offer for valued customers",
-                        "Stock up before the holiday rush",
-                        "Limited time offer — this weekend only",
-                        "Thank you for being a loyal customer",
-                    ]),
-                    body="Sample campaign — LLM generated content will replace this.",
-                    trigger_type=random.choice(["lull_period", "holiday", "pre_stock"]),
-                    status="sent",
-                    created_at=sent_date,
-                    sent_at=sent_date
-                )
-                db.add(campaign)
         db.commit()
-        print("Created sample past campaigns")
+        print(f"  {business.name}: {total_orders} orders so far")
 
-        # ── Summary ──
+    print(f"Created {total_orders} orders and {total_line_items} order line items")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def seed():
+    print("Loading Indian food dataset...")
+    df = pd.read_csv("indian_food.csv")
+    print(f"Dataset loaded: {len(df)} recipes")
+
+    db = SessionLocal()
+
+    try:
+        # Clear existing data in reverse dependency order
+        print("\nClearing existing data...")
+        db.query(OrderLineItem).delete()
+        db.query(Order).delete()
+        db.query(Customer).delete()
+        db.query(Item).delete()
+        db.query(Category).delete()
+        db.query(BusinessProfile).delete()
+        db.commit()
+        print("Cleared")
+
+        print("\nSeeding businesses...")
+        businesses = seed_businesses(db)
+
+        print("\nSeeding categories and items...")
+        seed_categories_and_items(db, businesses, df)
+
+        print("\nSeeding customers...")
+        customer_map = seed_customers(db, businesses)
+
+        print("\nSeeding orders and line items...")
+        seed_orders(db, businesses, customer_map)
+
         print("\nSeed completed successfully")
-        print(f"  Restaurants : {len(restaurant_objects)}")
-        print(f"  Customers   : {len(all_customers)}")
-        print(f"  Orders      : {total_orders_created}")
-        print(f"  Date range  : {START_DATE} → {END_DATE}")
-        print(f"\n  Lull periods built in:")
-        for lull in LULL_PERIODS:
-            print(f"    {lull['name']}: {lull['core_start']} → {lull['core_end']}")
-        print(f"\n  Peak periods built in:")
-        for peak in PEAK_PERIODS:
-            print(f"    {peak['name']}: {peak['start']} → {peak['end']}")
-        print(f"\n  Recovery periods built in:")
-        for rec in RECOVERY_PERIODS:
-            print(f"    {rec['start']} → {rec['end']} (multiplier: {rec['multiplier']})")
 
     except Exception as e:
         db.rollback()
-        print(f"Seed error: {e}")
+        print(f"Seed failed: {e}")
         raise
+
     finally:
         db.close()
+
 
 if __name__ == "__main__":
     seed()
